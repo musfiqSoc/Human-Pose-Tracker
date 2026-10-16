@@ -309,6 +309,50 @@
             </div>
         </section>
 
+        
+        <section class="panel">
+            <div class="top-row">
+                <h2>Activity Summary</h2>
+                <span class="status-pill" id="summaryBadge">
+                    ● Loading summary
+                </span>
+            </div>
+
+            <div class="analytics-grid">
+                <div class="metric-card">
+                    <div class="metric-label">Tracking Time</div>
+                    <div class="metric-value" id="totalTimeValue">
+                        0 sec
+                    </div>
+                    <div class="metric-note">Total tracking duration</div>
+                </div>
+
+                <div class="metric-card">
+                    <div class="metric-label">Moving Time</div>
+                    <div class="metric-value" id="movingTimeValue">
+                        0 sec
+                    </div>
+                    <div class="metric-note">Time classified as moving</div>
+                </div>
+
+                <div class="metric-card">
+                    <div class="metric-label">Stationary Time</div>
+                    <div class="metric-value" id="stationaryTimeValue">
+                        0 sec
+                    </div>
+                    <div class="metric-note">Time classified as stationary</div>
+                </div>
+
+                <div class="metric-card">
+                    <div class="metric-label">Movement Events</div>
+                    <div class="metric-value" id="movementEventsValue">
+                        0
+                    </div>
+                    <div class="metric-note">Detected movement starts</div>
+                </div>
+            </div>
+        </section>
+
         <section class="panel">
             <div class="top-row">
                 <h2>Movement History</h2>
@@ -351,6 +395,11 @@
         const movementValue = document.getElementById("movementValue");
         const fpsValue = document.getElementById("fpsValue");
         const analyticsBadge = document.getElementById("analyticsBadge");
+        const summaryBadge = document.getElementById("summaryBadge");
+        const totalTimeValue = document.getElementById("totalTimeValue");
+        const movingTimeValue = document.getElementById("movingTimeValue");
+        const stationaryTimeValue = document.getElementById("stationaryTimeValue");
+        const movementEventsValue = document.getElementById("movementEventsValue");
         const chartMessage = document.getElementById("chartMessage");
 
         const canvas = document.getElementById("movementChart");
@@ -452,7 +501,12 @@
             stopMetricsPolling();
 
             fetchMetrics();
-            metricsTimer = setInterval(fetchMetrics, 1000);
+            fetchSummary();
+
+            metricsTimer = setInterval(() => {
+                fetchMetrics();
+                fetchSummary();
+            }, 1000);
         }
 
         function stopMetricsPolling() {
@@ -514,6 +568,49 @@
             }
 
             drawGraph();
+        }
+
+        
+        function formatDuration(seconds) {
+            const total = Math.floor(Number(seconds) || 0);
+            const minutes = Math.floor(total / 60);
+            const remainingSeconds = total % 60;
+
+            if (minutes > 0) {
+                return `${minutes} min ${remainingSeconds} sec`;
+            }
+
+            return `${remainingSeconds} sec`;
+        }
+
+        async function fetchSummary() {
+            try {
+                const response = await fetch("/summary", {
+                    cache: "no-store"
+                });
+
+                if (!response.ok) {
+                    throw new Error("Summary request failed");
+                }
+
+                const data = await response.json();
+
+                totalTimeValue.textContent =
+                    formatDuration(data.total_tracking_seconds);
+
+                movingTimeValue.textContent =
+                    formatDuration(data.moving_seconds);
+
+                stationaryTimeValue.textContent =
+                    formatDuration(data.stationary_seconds);
+
+                movementEventsValue.textContent =
+                    Number(data.movement_events) || 0;
+
+                summaryBadge.textContent = "● Summary updated";
+            } catch (error) {
+                summaryBadge.textContent = "● Summary unavailable";
+            }
         }
 
         function drawGraph() {

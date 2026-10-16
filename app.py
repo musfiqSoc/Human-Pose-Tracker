@@ -23,6 +23,10 @@ CSV_FILE = BASE_DIR / "movement_history.csv"
 camera_lock = threading.Lock()
 stop_event = threading.Event()
 
+# Shared reference to the active camera.
+camera_state_lock = threading.Lock()
+active_camera = None
+
 metrics_lock = threading.Lock()
 latest_metrics = {
     "pose_status": "NOT DETECTED",
@@ -30,6 +34,26 @@ latest_metrics = {
     "movement_score": 0.0,
     "fps": 0.0,
 }
+
+# Activity Summary
+summary_lock = threading.Lock()
+
+activity_summary = {
+    "total_tracking_seconds": 0.0,
+    "moving_seconds": 0.0,
+    "stationary_seconds": 0.0,
+    "movement_events": 0,
+}
+
+
+def reset_summary():
+    with summary_lock:
+        activity_summary.update({
+            "total_tracking_seconds": 0.0,
+            "moving_seconds": 0.0,
+            "stationary_seconds": 0.0,
+            "movement_events": 0,
+        })
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -43,14 +67,34 @@ def get_metrics():
         return dict(latest_metrics)
 
 
+@app.get("/summary")
+def get_summary():
+    with summary_lock:
+        result = dict(activity_summary)
+
+    for key in (
+        "total_tracking_seconds",
+        "moving_seconds",
+        "stationary_seconds",
+    ):
+        result[key] = round(result[key], 2)
+
+    return result
+
+
 def save_history(pose_status, activity, score, fps):
     file_exists = CSV_FILE.exists()
 
     try:
-        with open(CSV_FILE, "a", newline="", encoding="utf-8") as file:
+        with open(
+            CSV_FILE,
+            "a",
+            newline="",
+            encoding="utf-8",
+        ) as file:
             writer = csv.writer(file)
 
-            if not file_exists:
+            if not file_exists or CSV_FILE.stat().st_size == 0:
                 writer.writerow([
                     "timestamp",
                     "pose_status",
@@ -72,17 +116,26 @@ def save_history(pose_status, activity, score, fps):
 
 
 def generate_frames():
+    global active_camera
+
     if not camera_lock.acquire(blocking=False):
+        print("Tracking is already running.")
         return
 
     camera = None
 
     try:
-        stop_event.clear()
+        # Stop may have been requested before the stream started.
+        if stop_event.is_set():
+            print("STOP EVENT DETECTED before camera startup.")
+            return
+
+        reset_summary()
 
         mp_pose = mp.solutions.pose
         mp_draw = mp.solutions.drawing_utils
 
+        # Open webcam on Windows, with a fallback backend.
         camera = cv2.VideoCapture(0, cv2.CAP_DSHOW)
 
         if not camera.isOpened():
@@ -95,14 +148,29 @@ def generate_frames():
 
         camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+        # Publish the active camera so Stop can release it.
+        with camera_state_lock:
+            if stop_event.is_set():
+                camera.release()
+                camera = None
+                print("STOP EVENT DETECTED during camera startup.")
+                return
+
+            active_camera = camera
 
         previous_points = None
         movement_score = 0.0
         fps = 0.0
 
+        last_summary_time = time.monotonic()
+        last_log_time = last_summary_time
+
+        was_moving = False
+
         frame_count = 0
         fps_start = time.perf_counter()
-        last_log_time = time.monotonic()
 
         with mp_pose.Pose(
             static_image_mode=False,
@@ -113,10 +181,21 @@ def generate_frames():
             min_tracking_confidence=0.5,
         ) as pose:
 
-            while not stop_event.is_set():
+            while True:
+                if stop_event.is_set():
+                    print("STOP EVENT DETECTED")
+                    break
+
                 success, frame = camera.read()
 
+                # Stop may have been requested during camera.read().
+                if stop_event.is_set():
+                    print("STOP EVENT DETECTED after camera read.")
+                    break
+
                 if not success:
+                    if not stop_event.is_set():
+                        print("WARNING: Could not read webcam frame.")
                     break
 
                 frame = cv2.flip(frame, 1)
@@ -127,6 +206,7 @@ def generate_frames():
 
                 pose_status = "NOT DETECTED"
                 activity = "NO POSE"
+                status_color = (0, 0, 255)
 
                 if results.pose_landmarks:
                     landmarks = results.pose_landmarks.landmark
@@ -137,18 +217,13 @@ def generate_frames():
                         mp_pose.POSE_CONNECTIONS,
                     )
 
-                    # Use visible landmarks for movement measurement.
-                    points = [
-                        (i, lm.x, lm.y)
+                    current_points = {
+                        i: (lm.x, lm.y)
                         for i, lm in enumerate(landmarks)
                         if lm.visibility >= 0.5
-                    ]
-
-                    current_points = {
-                        i: (x, y) for i, x, y in points
                     }
 
-                    if previous_points:
+                    if previous_points is not None:
                         common = (
                             current_points.keys()
                             & previous_points.keys()
@@ -165,7 +240,7 @@ def generate_frames():
                         if distances:
                             movement_score = (
                                 sum(distances) / len(distances)
-                            ) * 1000
+                            ) * 1000.0
                         else:
                             movement_score = 0.0
                     else:
@@ -173,31 +248,64 @@ def generate_frames():
 
                     previous_points = current_points
                     pose_status = "DETECTED"
+                    status_color = (0, 255, 0)
 
-                    # A simple threshold; we can tune it after testing.
                     activity = (
                         "MOVING"
                         if movement_score >= 2.5
                         else "STATIONARY"
                     )
 
-                    status_color = (0, 255, 0)
-
                 else:
                     previous_points = None
                     movement_score = 0.0
-                    status_color = (0, 0, 255)
 
+                # Update elapsed tracking time.
+                now = time.monotonic()
+                delta_seconds = max(
+                    0.0,
+                    now - last_summary_time,
+                )
+                last_summary_time = now
+
+                with summary_lock:
+                    activity_summary[
+                        "total_tracking_seconds"
+                    ] += delta_seconds
+
+                    if pose_status == "DETECTED":
+                        if activity == "MOVING":
+                            activity_summary[
+                                "moving_seconds"
+                            ] += delta_seconds
+
+                            if not was_moving:
+                                activity_summary[
+                                    "movement_events"
+                                ] += 1
+
+                            was_moving = True
+
+                        else:
+                            activity_summary[
+                                "stationary_seconds"
+                            ] += delta_seconds
+
+                            was_moving = False
+                    else:
+                        was_moving = False
+
+                # Calculate FPS.
                 frame_count += 1
-                now = time.perf_counter()
-                elapsed = now - fps_start
+                perf_now = time.perf_counter()
+                elapsed = perf_now - fps_start
 
                 if elapsed >= 1.0:
                     fps = frame_count / elapsed
                     frame_count = 0
-                    fps_start = now
+                    fps_start = perf_now
 
-                # Display analytics on the live camera feed.
+                # Draw live information on the camera frame.
                 lines = [
                     (f"POSE: {pose_status}", status_color),
                     (f"ACTIVITY: {activity}", (255, 255, 0)),
@@ -230,7 +338,7 @@ def generate_frames():
                         "fps": round(fps, 2),
                     })
 
-                # Save one history record approximately each second.
+                # Save history approximately once per second.
                 log_now = time.monotonic()
 
                 if log_now - last_log_time >= 1.0:
@@ -255,11 +363,22 @@ def generate_frames():
                 )
 
     except Exception as error:
-        print(f"Tracking error: {error}")
+        if stop_event.is_set():
+            print(f"Tracking stopped during camera processing: {error}")
+        else:
+            print(f"Tracking error: {error}")
 
     finally:
+        # Remove the shared camera reference safely.
+        with camera_state_lock:
+            if active_camera is camera:
+                active_camera = None
+
         if camera is not None:
-            camera.release()
+            try:
+                camera.release()
+            except Exception as error:
+                print(f"Camera release error: {error}")
 
         camera_lock.release()
         print("Camera released.")
@@ -267,6 +386,9 @@ def generate_frames():
 
 @app.get("/video_feed")
 def video_feed():
+    # Reset the stop signal before starting a new stream.
+    stop_event.clear()
+
     return StreamingResponse(
         generate_frames(),
         media_type="multipart/x-mixed-replace; boundary=frame",
@@ -275,5 +397,68 @@ def video_feed():
 
 @app.post("/stop_tracking")
 def stop_tracking():
+    global active_camera
+
+    print("STOP REQUEST RECEIVED")
     stop_event.set()
-    return JSONResponse({"status": "stop_requested"})
+
+    # Release the webcam directly when Stop is requested.
+    with camera_state_lock:
+        camera_to_release = active_camera
+        active_camera = None
+
+    if camera_to_release is not None:
+        try:
+            camera_to_release.release()
+            print("Camera release requested by Stop button.")
+        except Exception as error:
+            print(f"Camera stop error: {error}")
+
+    return JSONResponse({
+        "status": "stop_requested"
+    })
+
+
+@app.get("/history")
+def get_movement_history():
+    if not CSV_FILE.exists():
+        return {
+            "records": [],
+            "message": "No movement history available yet.",
+        }
+
+    records = []
+
+    try:
+        with open(
+            CSV_FILE,
+            "r",
+            newline="",
+            encoding="utf-8",
+        ) as file:
+            reader = csv.DictReader(file)
+
+            for row in reader:
+                try:
+                    records.append({
+                        "timestamp": row["timestamp"],
+                        "pose_status": row["pose_status"],
+                        "activity": row["activity"],
+                        "movement_score": float(
+                            row["movement_score"]
+                        ),
+                        "fps": float(row["fps"]),
+                    })
+                except (KeyError, TypeError, ValueError):
+                    continue
+
+    except OSError as error:
+        return JSONResponse(
+            {"error": str(error)},
+            status_code=500,
+        )
+
+    return {
+        "records": records,
+        "total_records": len(records),
+    }
