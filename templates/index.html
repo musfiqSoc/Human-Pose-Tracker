@@ -35,7 +35,7 @@
         }
 
         main {
-            max-width: 1000px;
+            max-width: 1100px;
             margin: 35px auto;
             padding: 0 18px;
         }
@@ -45,6 +45,7 @@
             background: #191f2b;
             border: 1px solid #30394a;
             border-radius: 16px;
+            margin-bottom: 22px;
         }
 
         .top-row {
@@ -124,10 +125,86 @@
             color: #aab5c8;
         }
 
+        .analytics-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 14px;
+            margin-top: 20px;
+        }
+
+        .metric-card {
+            padding: 18px;
+            background: #111722;
+            border: 1px solid #30394a;
+            border-radius: 12px;
+            min-width: 0;
+        }
+
+        .metric-label {
+            color: #aab5c8;
+            font-size: 13px;
+            margin-bottom: 12px;
+        }
+
+        .metric-value {
+            font-size: 23px;
+            font-weight: bold;
+            overflow-wrap: anywhere;
+        }
+
+        .metric-note {
+            color: #8290a6;
+            font-size: 12px;
+            margin-top: 8px;
+        }
+
+        .green {
+            color: #57e39b;
+        }
+
+        .yellow {
+            color: #ffd166;
+        }
+
+        .red {
+            color: #ff7777;
+        }
+
+        .chart-wrap {
+            position: relative;
+            width: 100%;
+            height: 260px;
+            margin-top: 18px;
+        }
+
+        #movementChart {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+
+        .chart-caption {
+            color: #aab5c8;
+            font-size: 13px;
+            line-height: 1.6;
+        }
+
         footer {
             margin-top: 20px;
+            padding-bottom: 25px;
             color: #8290a6;
             font-size: 13px;
+            line-height: 1.8;
+        }
+
+        @media (max-width: 750px) {
+            .analytics-grid {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+
+            .metric-value {
+                font-size: 20px;
+            }
         }
 
         @media (max-width: 500px) {
@@ -138,6 +215,18 @@
             .panel {
                 padding: 15px;
             }
+
+            .analytics-grid {
+                gap: 9px;
+            }
+
+            .metric-card {
+                padding: 13px;
+            }
+
+            .chart-wrap {
+                height: 220px;
+            }
         }
     </style>
 </head>
@@ -145,16 +234,14 @@
 <body>
     <header>
         <h1>Human Pose Tracker</h1>
-        <p>Real-time human pose detection dashboard</p>
+        <p>Real-time human pose detection and movement analytics</p>
     </header>
 
     <main>
         <section class="panel">
             <div class="top-row">
                 <h2>Live Camera</h2>
-                <span class="status-pill" id="badge">
-                    ● Ready
-                </span>
+                <span class="status-pill" id="badge">● Ready</span>
             </div>
 
             <div class="camera">
@@ -179,10 +266,75 @@
             <p id="message">Status: Ready</p>
         </section>
 
+        <section class="panel">
+            <div class="top-row">
+                <h2>Live Analytics</h2>
+                <span class="status-pill" id="analyticsBadge">
+                    ● Waiting for data
+                </span>
+            </div>
+
+            <div class="analytics-grid">
+                <div class="metric-card">
+                    <div class="metric-label">Human Pose</div>
+                    <div class="metric-value yellow" id="poseValue">
+                        Waiting
+                    </div>
+                    <div class="metric-note">Landmark detection</div>
+                </div>
+
+                <div class="metric-card">
+                    <div class="metric-label">Activity</div>
+                    <div class="metric-value" id="activityValue">
+                        Waiting
+                    </div>
+                    <div class="metric-note">Movement estimate</div>
+                </div>
+
+                <div class="metric-card">
+                    <div class="metric-label">Movement Score</div>
+                    <div class="metric-value" id="movementValue">
+                        0.00
+                    </div>
+                    <div class="metric-note">Relative landmark change</div>
+                </div>
+
+                <div class="metric-card">
+                    <div class="metric-label">Live FPS</div>
+                    <div class="metric-value" id="fpsValue">
+                        0.0
+                    </div>
+                    <div class="metric-note">Frames per second</div>
+                </div>
+            </div>
+        </section>
+
+        <section class="panel">
+            <div class="top-row">
+                <h2>Movement History</h2>
+                <span class="status-pill">Recent samples</span>
+            </div>
+
+            <p class="chart-caption">
+                The graph updates while tracking is active.
+                Higher values indicate more landmark movement.
+            </p>
+
+            <div class="chart-wrap">
+                <canvas id="movementChart"></canvas>
+            </div>
+
+            <p class="chart-caption" id="chartMessage">
+                Start tracking to collect movement data.
+            </p>
+        </section>
+
         <footer>
             Python · FastAPI · OpenCV · MediaPipe
             <br>
             Camera processing runs on your computer.
+            <br>
+            Movement metrics are estimates, not physical distance measurements.
         </footer>
     </main>
 
@@ -194,8 +346,21 @@
         const startButton = document.getElementById("start");
         const stopButton = document.getElementById("stop");
 
+        const poseValue = document.getElementById("poseValue");
+        const activityValue = document.getElementById("activityValue");
+        const movementValue = document.getElementById("movementValue");
+        const fpsValue = document.getElementById("fpsValue");
+        const analyticsBadge = document.getElementById("analyticsBadge");
+        const chartMessage = document.getElementById("chartMessage");
+
+        const canvas = document.getElementById("movementChart");
+        const ctx = canvas.getContext("2d");
+
         let tracking = false;
         let stopRequested = false;
+        let metricsTimer = null;
+        let graphValues = [];
+        const MAX_POINTS = 60;
 
         function setStatus(text) {
             message.textContent = "Status: " + text;
@@ -208,21 +373,43 @@
             placeholder.style.display = "block";
         }
 
+        function resetMetrics() {
+            poseValue.textContent = "Waiting";
+            poseValue.className = "metric-value yellow";
+
+            activityValue.textContent = "Waiting";
+            activityValue.className = "metric-value";
+
+            movementValue.textContent = "0.00";
+            fpsValue.textContent = "0.0";
+
+            analyticsBadge.textContent = "● Waiting for data";
+        }
+
         function startTracking() {
-            if (tracking) return;
+            if (tracking || stopRequested) return;
 
             tracking = true;
-            stopRequested = false;
-
             startButton.disabled = true;
             stopButton.disabled = false;
+
+            graphValues = [];
+            drawGraph();
 
             placeholder.style.display = "none";
             video.style.display = "block";
 
             setStatus("Connecting to camera...");
+            analyticsBadge.textContent = "● Connecting";
 
             video.src = "/video_feed?t=" + Date.now();
+
+            // Wait briefly for the camera stream to initialize.
+            setTimeout(() => {
+                if (tracking) {
+                    startMetricsPolling();
+                }
+            }, 500);
         }
 
         async function stopTracking() {
@@ -231,6 +418,7 @@
             stopRequested = true;
             tracking = false;
 
+            stopMetricsPolling();
             startButton.disabled = true;
             stopButton.disabled = true;
 
@@ -245,10 +433,12 @@
                     throw new Error("Stop request failed");
                 }
 
-                // Disconnect the browser from the video stream.
                 showStoppedView();
-
                 setStatus("Camera stopped");
+                analyticsBadge.textContent = "● Tracking stopped";
+                chartMessage.textContent =
+                    "Tracking stopped. The graph shows this session's samples.";
+
             } catch (error) {
                 setStatus("Stop request failed; stop the server if needed");
             } finally {
@@ -258,17 +448,187 @@
             }
         }
 
+        function startMetricsPolling() {
+            stopMetricsPolling();
+
+            fetchMetrics();
+            metricsTimer = setInterval(fetchMetrics, 1000);
+        }
+
+        function stopMetricsPolling() {
+            if (metricsTimer !== null) {
+                clearInterval(metricsTimer);
+                metricsTimer = null;
+            }
+        }
+
+        async function fetchMetrics() {
+            if (!tracking) return;
+
+            try {
+                const response = await fetch("/metrics", {
+                    cache: "no-store"
+                });
+
+                if (!response.ok) {
+                    throw new Error("Metrics request failed");
+                }
+
+                const data = await response.json();
+
+                if (!tracking) return;
+
+                updateMetrics(data);
+
+            } catch (error) {
+                analyticsBadge.textContent = "● Metrics unavailable";
+            }
+        }
+
+        function updateMetrics(data) {
+            const pose = data.pose_status || "NOT DETECTED";
+            const activity = data.activity || "WAITING";
+            const score = Number(data.movement_score) || 0;
+            const fps = Number(data.fps) || 0;
+
+            poseValue.textContent = pose;
+            poseValue.className = "metric-value " +
+                (pose === "DETECTED" ? "green" : "red");
+
+            activityValue.textContent = activity;
+            activityValue.className = "metric-value " +
+                (activity === "MOVING" ? "green" : "yellow");
+
+            movementValue.textContent = score.toFixed(2);
+            fpsValue.textContent = fps.toFixed(1);
+
+            analyticsBadge.textContent = "● Live data";
+            chartMessage.textContent =
+                "Showing up to " + MAX_POINTS +
+                " recent samples. Latest score: " + score.toFixed(2);
+
+            graphValues.push(score);
+
+            if (graphValues.length > MAX_POINTS) {
+                graphValues.shift();
+            }
+
+            drawGraph();
+        }
+
+        function drawGraph() {
+            const rect = canvas.getBoundingClientRect();
+            if (!rect.width || !rect.height) return;
+
+            const dpr = window.devicePixelRatio || 1;
+
+            canvas.width = Math.round(rect.width * dpr);
+            canvas.height = Math.round(rect.height * dpr);
+
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+            const width = rect.width;
+            const height = rect.height;
+
+            ctx.clearRect(0, 0, width, height);
+
+            const left = 42;
+            const right = 12;
+            const top = 16;
+            const bottom = 28;
+
+            const plotWidth = width - left - right;
+            const plotHeight = height - top - bottom;
+
+            const maxValue = Math.max(10, ...graphValues) * 1.15;
+
+            // Grid and Y-axis labels
+            ctx.font = "11px Arial";
+            ctx.lineWidth = 1;
+            ctx.strokeStyle = "#30394a";
+            ctx.fillStyle = "#aab5c8";
+
+            for (let i = 0; i <= 4; i++) {
+                const y = top + (plotHeight * i / 4);
+
+                ctx.beginPath();
+                ctx.moveTo(left, y);
+                ctx.lineTo(width - right, y);
+                ctx.stroke();
+
+                const label = (maxValue * (1 - i / 4)).toFixed(1);
+                ctx.fillText(label, 3, y + 4);
+            }
+
+            if (graphValues.length === 0) {
+                ctx.fillStyle = "#aab5c8";
+                ctx.font = "14px Arial";
+                ctx.fillText(
+                    "Waiting for movement data...",
+                    left + 10,
+                    top + plotHeight / 2
+                );
+                return;
+            }
+
+            if (graphValues.length === 1) {
+                const y = top + plotHeight *
+                    (1 - graphValues[0] / maxValue);
+
+                ctx.fillStyle = "#57e39b";
+                ctx.beginPath();
+                ctx.arc(left + plotWidth, y, 4, 0, Math.PI * 2);
+                ctx.fill();
+                return;
+            }
+
+            // Movement line
+            ctx.beginPath();
+
+            graphValues.forEach((value, index) => {
+                const x = left +
+                    (index / (MAX_POINTS - 1)) * plotWidth;
+
+                const y = top + plotHeight *
+                    (1 - value / maxValue);
+
+                if (index === 0) {
+                    ctx.moveTo(x, y);
+                } else {
+                    ctx.lineTo(x, y);
+                }
+            });
+
+            ctx.strokeStyle = "#57e39b";
+            ctx.lineWidth = 2.5;
+            ctx.lineJoin = "round";
+            ctx.stroke();
+
+            // X-axis labels
+            ctx.fillStyle = "#aab5c8";
+            ctx.font = "11px Arial";
+            ctx.fillText("Older", left, height - 7);
+            ctx.fillText("Latest", width - right - 35, height - 7);
+        }
+
         video.onerror = () => {
             if (!tracking) return;
 
             tracking = false;
+            stopMetricsPolling();
             showStoppedView();
 
             startButton.disabled = false;
             stopButton.disabled = true;
 
             setStatus("Camera unavailable");
+            analyticsBadge.textContent = "● No live data";
         };
+
+        window.addEventListener("resize", drawGraph);
+
+        drawGraph();
+        resetMetrics();
     </script>
 </body>
 </html>
