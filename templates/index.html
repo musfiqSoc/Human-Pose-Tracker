@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>Human Pose Tracker</title>
+
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            background: #10141d;
+            color: #f4f7fb;
+            font-family: Arial, sans-serif;
+        }
+
+        header {
+            padding: 24px 6%;
+            background: #191f2b;
+            border-bottom: 1px solid #30394a;
+        }
+
+        header h1 {
+            margin: 0;
+            font-size: 26px;
+        }
+
+        header p {
+            color: #aab5c8;
+            margin-bottom: 0;
+        }
+
+        main {
+            max-width: 1000px;
+            margin: 35px auto;
+            padding: 0 18px;
+        }
+
+        .panel {
+            padding: 22px;
+            background: #191f2b;
+            border: 1px solid #30394a;
+            border-radius: 16px;
+        }
+
+        .top-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        .status-pill {
+            padding: 8px 12px;
+            border-radius: 20px;
+            background: #343e50;
+            color: #e3eaf5;
+            font-size: 13px;
+        }
+
+        .camera {
+            width: 100%;
+            aspect-ratio: 16 / 9;
+            margin-top: 18px;
+            background: #080b10;
+            border-radius: 12px;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .camera img {
+            display: none;
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+        }
+
+        .placeholder {
+            padding: 20px;
+            text-align: center;
+            color: #aab5c8;
+        }
+
+        .controls {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-top: 20px;
+        }
+
+        button {
+            padding: 12px 22px;
+            border: none;
+            border-radius: 9px;
+            font-size: 15px;
+            font-weight: bold;
+            cursor: pointer;
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        #start {
+            background: #57e39b;
+            color: #10251b;
+        }
+
+        #stop {
+            background: #343e50;
+            color: white;
+        }
+
+        #message {
+            margin-top: 18px;
+            color: #aab5c8;
+        }
+
+        footer {
+            margin-top: 20px;
+            color: #8290a6;
+            font-size: 13px;
+        }
+
+        @media (max-width: 500px) {
+            header h1 {
+                font-size: 22px;
+            }
+
+            .panel {
+                padding: 15px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <header>
+        <h1>Human Pose Tracker</h1>
+        <p>Real-time human pose detection dashboard</p>
+    </header>
+
+    <main>
+        <section class="panel">
+            <div class="top-row">
+                <h2>Live Camera</h2>
+                <span class="status-pill" id="badge">
+                    ● Ready
+                </span>
+            </div>
+
+            <div class="camera">
+                <img id="video" alt="Live pose tracking">
+
+                <div class="placeholder" id="placeholder">
+                    <h3>Camera is stopped</h3>
+                    <p>Press Start Tracking to begin.</p>
+                </div>
+            </div>
+
+            <div class="controls">
+                <button id="start" onclick="startTracking()">
+                    Start Tracking
+                </button>
+
+                <button id="stop" onclick="stopTracking()" disabled>
+                    Stop Tracking
+                </button>
+            </div>
+
+            <p id="message">Status: Ready</p>
+        </section>
+
+        <footer>
+            Python · FastAPI · OpenCV · MediaPipe
+            <br>
+            Camera processing runs on your computer.
+        </footer>
+    </main>
+
+    <script>
+        const video = document.getElementById("video");
+        const placeholder = document.getElementById("placeholder");
+        const message = document.getElementById("message");
+        const badge = document.getElementById("badge");
+        const startButton = document.getElementById("start");
+        const stopButton = document.getElementById("stop");
+
+        let tracking = false;
+        let stopRequested = false;
+
+        function setStatus(text) {
+            message.textContent = "Status: " + text;
+            badge.textContent = "● " + text;
+        }
+
+        function showStoppedView() {
+            video.removeAttribute("src");
+            video.style.display = "none";
+            placeholder.style.display = "block";
+        }
+
+        function startTracking() {
+            if (tracking) return;
+
+            tracking = true;
+            stopRequested = false;
+
+            startButton.disabled = true;
+            stopButton.disabled = false;
+
+            placeholder.style.display = "none";
+            video.style.display = "block";
+
+            setStatus("Connecting to camera...");
+
+            video.src = "/video_feed?t=" + Date.now();
+        }
+
+        async function stopTracking() {
+            if (stopRequested) return;
+
+            stopRequested = true;
+            tracking = false;
+
+            startButton.disabled = true;
+            stopButton.disabled = true;
+
+            setStatus("Stopping camera...");
+
+            try {
+                const response = await fetch("/stop_tracking", {
+                    method: "POST"
+                });
+
+                if (!response.ok) {
+                    throw new Error("Stop request failed");
+                }
+
+                // Disconnect the browser from the video stream.
+                showStoppedView();
+
+                setStatus("Camera stopped");
+            } catch (error) {
+                setStatus("Stop request failed; stop the server if needed");
+            } finally {
+                startButton.disabled = false;
+                stopButton.disabled = true;
+                stopRequested = false;
+            }
+        }
+
+        video.onerror = () => {
+            if (!tracking) return;
+
+            tracking = false;
+            showStoppedView();
+
+            startButton.disabled = false;
+            stopButton.disabled = true;
+
+            setStatus("Camera unavailable");
+        };
+    </script>
+</body>
+</html>
